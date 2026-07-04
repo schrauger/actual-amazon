@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_path="${1:-data/amazon-history.json}"
+mkdir -p "$(dirname "$output_path")"
+
+if ! command -v amazon-orders >/dev/null 2>&1; then
+  echo "amazon-orders is not installed. Run: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+# The amazon-orders library is unofficial and may prompt for login/MFA in the terminal.
+python src/fetch_amazon.py --output "$output_path" "${@:2}"

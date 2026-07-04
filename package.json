@@ -1,0 +1,24 @@
+{
+  "name": "actual-amazon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Helper for matching Amazon purchases to Actual Budget transactions.",
+  "scripts": {
+    "amazon:login": "amazon-orders login",
+    "amazon:fetch": "./bin/fetch-amazon data/amazon-history.json",
+    "actual:list": "node src/actual.js list",
+    "match": "node src/actual.js match",
+    "run": "node src/actual.js run"
+  },
+  "dependencies": {
+    "@actual-app/api": "latest",
+    "dotenv": "latest"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
+  "bin": {
+    "actual-amazon": "./bin/actual-amazon"
+  }
+}
