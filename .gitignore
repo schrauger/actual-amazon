@@ -5,6 +5,7 @@
 
 # Actual Budget local cache/database
 .actual-cache/
+.actual-cache.backup-*/
 *.sqlite
 *.sqlite3
 *.db
