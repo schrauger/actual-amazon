@@ -4,13 +4,13 @@ Helper for reconciling Amazon purchases against Actual Budget.
 
 By default, `actual-amazon` fetches Amazon data, matches it against unmatched Actual transactions, and applies matched updates to Actual. Multi-item charges become splits; single-item charges keep the base transaction and set its note. Use `--dry-run` to preview without modifying Actual.
 
-Multiple Amazon accounts and multiple Actual card accounts are supported. Amazon purchases are routed to the correct Actual account using the Amazon payment method's last four digits.
+Multiple Amazon accounts and multiple Actual card accounts are supported. Amazon purchases are routed to the correct Actual account using the last four digits of the credit card used for the purchase.
 
 ## Install
 
 Node.js 22 is recommended. `better-sqlite3`, used by the Actual API, requires a supported Node version.
 
-```
+```bash
 cd ~/Code/actual-amazon
 
 nvm install 22
@@ -30,7 +30,7 @@ cp actual-amazon.example.json actual-amazon.json
 
 Fill in `.env` with your Actual server URL, server password, budget sync ID, and other matching settings.
 
-Fill in `actual-amazon.json` with your Amazon accounts and the Actual account associated with each Amazon payment method.
+Fill in `actual-amazon.json` with your Amazon accounts and the Actual account associated with each credit card.
 
 Do not commit `.env`, `actual-amazon.json`, or Amazon cookie files.
 
@@ -40,7 +40,7 @@ Do not commit `.env`, `actual-amazon.json`, or Amazon cookie files.
 
 The `.env` file contains connection and matching settings:
 
-```
+```dotenv
 ACTUAL_SERVER_URL=https://actual.example.com
 ACTUAL_SERVER_PASSWORD=
 ACTUAL_BUDGET_SYNC_ID=
@@ -56,17 +56,15 @@ The configured Actual accounts must already exist in the same budget.
 
 ### Amazon accounts
 
-Amazon accounts and their card-to-Actual mappings are configured in `actual-amazon.json`.
+Amazon accounts and their credit-card-to-Actual mappings are configured in `actual-amazon.json`.
 
 Example:
 
-```
+```json
 {
   "amazonAccounts": {
     "personal": {
       "username": "amazon-account@example.com",
-      "domain": "amazon.com",
-      "cookieJar": "~/.config/amazonorders/cookies-personal.json",
       "paymentMethods": {
         "1234": "Frontier Airlines Mastercard",
         "2345": "Chase Amazon VISA"
@@ -74,8 +72,6 @@ Example:
     },
     "second": {
       "username": "another-account@example.com",
-      "domain": "amazon.com",
-      "cookieJar": "~/.config/amazonorders/cookies-second.json",
       "paymentMethods": {
         "3456": "Chase Freedom VISA"
       }
@@ -84,9 +80,75 @@ Example:
 }
 ```
 
-Each Amazon account has its own persistent cookie jar.
+Each Amazon account has its own persistent login session. The application automatically creates a separate cookie jar for each account under:
 
-`paymentMethods` maps the last four digits reported by Amazon to the exact Actual account name that should receive the matching transaction.
+```text
+~/.config/amazonorders/
+```
+
+For example:
+
+```text
+~/.config/amazonorders/cookies-personal.json
+~/.config/amazonorders/cookies-second.json
+```
+
+#### Credit card mapping
+
+The keys in `paymentMethods` **must be the last four digits of the credit card used for the Amazon purchase**.
+
+For example:
+
+```json
+"1234": "Frontier Airlines Mastercard"
+```
+
+means that an Amazon purchase charged to the credit card ending in **1234** should be matched against the Actual account named `Frontier Airlines Mastercard`.
+
+These four digits are the primary link between an Amazon purchase and the corresponding Actual credit-card account.
+
+The value must be the **exact name of the Actual account** in your Actual budget.
+
+For example:
+
+```json
+"1234": "Frontier Airlines Mastercard"
+```
+
+requires an Actual account named exactly:
+
+```text
+Frontier Airlines Mastercard
+```
+
+Use `npm run actual:list` to see the exact account names in the configured Actual budget.
+
+You can configure multiple credit cards under one Amazon account:
+
+```json
+"personal": {
+  "username": "amazon-account@example.com",
+  "paymentMethods": {
+    "1234": "Frontier Airlines Mastercard",
+    "2345": "Chase Amazon VISA"
+  }
+}
+```
+
+You can also configure the same Actual credit-card account under multiple Amazon accounts:
+
+```json
+"personal": {
+  "paymentMethods": {
+    "1234": "Frontier Airlines Mastercard"
+  }
+},
+"second": {
+  "paymentMethods": {
+    "1234": "Frontier Airlines Mastercard"
+  }
+}
+```
 
 This allows:
 
@@ -94,29 +156,29 @@ This allows:
 * One Amazon account to use multiple credit cards.
 * The same Actual credit-card account to receive purchases from multiple Amazon accounts.
 
-Unmapped payment methods are reported and are not matched to an arbitrary Actual account.
+If Amazon reports a credit card that is not configured, the purchase is reported as an unmapped Amazon charge and is not matched to an arbitrary Actual account.
 
 ## Amazon login
 
-Amazon authentication is handled by `amazon-orders`. Each configured Amazon account has its own persistent cookie jar.
+Amazon authentication is handled by `amazon-orders`. Each configured Amazon account has its own persistent login session.
 
 Log in to an account with:
 
-```
+```bash
 ./bin/amazon-login personal
 ```
 
 To clear that account's stored cookies and authenticate again:
 
-```
+```bash
 ./bin/amazon-login personal --fresh
 ```
 
 The program does not use cookies from an existing Firefox or Chrome profile. The `amazon-orders` session and its cookie jar are used instead.
 
-Amazon may require MFA, JavaScript challenges, WAF challenges, or CAPTCHA checks. Playwright and Chromium are installed separately so `amazon-orders` can handle browser-based authentication challenges.
-
 Amazon login state is reused on subsequent runs. If Amazon rejects the stored session, the program will attempt to authenticate again.
+
+Amazon may require MFA, JavaScript challenges, WAF challenges, or CAPTCHA checks. Playwright and Chromium are installed separately so `amazon-orders` can handle browser-based authentication challenges.
 
 ## Amazon CAPTCHA and browser challenges
 
@@ -124,13 +186,13 @@ Amazon may occasionally interrupt login with a JavaScript authentication challen
 
 If you repeatedly receive an error such as:
 
-```
+```text
 Amazon returned a JavaScript-based authentication challenge.
 ```
 
 or:
 
-```
+```text
 Browser timed out waiting for the JavaScript challenge to resolve.
 ```
 
@@ -138,13 +200,13 @@ you can configure `amazon-orders` to use its Playwright browser handlers.
 
 Create:
 
-```
+```text
 ~/.config/amazonorders/config.yml
 ```
 
 with:
 
-```
+```yaml
 auth_forms_classes:
   - amazonorders.contrib.browser.playwright.PlaywrightAcicForm
   - amazonorders.contrib.browser.playwright.PlaywrightJSAuthForm
@@ -161,27 +223,25 @@ The browser configuration is used by `amazon-orders` itself; it is separate from
 
 The current `amazon-orders` package uses the following configuration location on Linux and macOS:
 
-```
+```text
 ~/.config/amazonorders/config.yml
 ```
 
 On Windows, the package currently derives the same path from the user's home directory rather than using `%APPDATA%`, so it will normally be under:
 
-```
+```text
 %USERPROFILE%\.config\amazonorders\config.yml
 ```
 
-The exact resolved location can be confirmed from the `amazon-orders` installation if necessary.
-
 The `[browser]` extra is required:
 
-```
+```bash
 pip install amazon-orders[browser]
 ```
 
 and the Chromium browser must be installed:
 
-```
+```bash
 playwright install chromium
 ```
 
@@ -189,7 +249,7 @@ The browser handlers above address JavaScript, ACIC, and WAF browser challenges.
 
 If Amazon presents a challenge repeatedly, clear the corresponding Amazon cookie jar and authenticate again:
 
-```
+```bash
 ./bin/amazon-login personal --fresh
 ```
 
@@ -197,7 +257,7 @@ Amazon may also increase CAPTCHA frequency after repeated failed login attempts.
 
 ## Normal run
 
-```
+```bash
 ./bin/actual-amazon
 ```
 
@@ -207,7 +267,7 @@ The command:
 2. Finds unmatched Amazon transactions across all configured Actual card accounts.
 3. Finds the earliest unmatched Actual transaction and subtracts a 7-day safety window.
 4. Fetches Amazon order and charge data from that date forward for every configured Amazon account.
-5. Routes each Amazon charge to an Actual account using its payment method last four digits.
+5. Routes each Amazon charge to an Actual account using the last four digits of the credit card used for the purchase.
 6. Matches Amazon charges to Actual transactions only within the mapped Actual account.
 7. Writes a report to `output/match-proposals.json`.
 8. Applies matched updates to Actual: split multi-item charges, set base notes for single-item charges.
@@ -217,13 +277,13 @@ The date is based on the oldest currently unmatched Actual transaction. It is no
 
 Use dry-run mode to preview changes without modifying Actual:
 
-```
+```bash
 ./bin/actual-amazon --dry-run
 ```
 
 Optional arguments:
 
-```
+```bash
 ./bin/actual-amazon --dry-run --safety-days 14
 ./bin/actual-amazon --dry-run --amazon-json data/amazon-history.json
 ./bin/actual-amazon --dry-run --report output/match-proposals.json
@@ -235,31 +295,35 @@ Safety behavior: apply skips transactions that are already split, no longer unca
 
 Amazon data is fetched separately for each configured Amazon account and combined into one matching run.
 
-Each charge keeps its Amazon account name, payment method, and payment method last four digits. The payment method mapping determines which Actual account can match that charge.
+Each charge keeps its Amazon account name and the last four digits of the credit card used for the purchase. The credit-card mapping determines which Actual account can match that charge.
 
 For example:
 
-```
+```text
 Amazon account: personal
-Card: ••••1234
+Credit card: ••••1234
 Actual account: Frontier Airlines Mastercard
 
 Amazon account: personal
-Card: ••••2345
+Credit card: ••••2345
 Actual account: Chase Amazon VISA
 
 Amazon account: second
-Card: ••••3456
+Credit card: ••••3456
 Actual account: Chase Freedom VISA
 ```
 
+The four-digit value in `paymentMethods` must match the last four digits of the credit card Amazon reports for the purchase.
+
 The matcher uses the Actual account as part of the match key so identical amounts on different cards cannot be incorrectly matched to one another.
+
+The Actual budget is downloaded once, and all configured card accounts are processed as part of the same run. There is no need to maintain a separate copy of the project for each Amazon account or credit card.
 
 ## Manual Amazon fetch
 
 The Python fetcher can also be run directly:
 
-```
+```bash
 ./bin/fetch-amazon data/amazon-history.json --year 2026 --transaction-days 365 --supplement-after 2026-01-01
 ```
 
@@ -267,7 +331,7 @@ For normal multi-account operation, use `./bin/actual-amazon` instead. It reads 
 
 ## Actual inventory check
 
-```
+```bash
 npm run actual:list
 ```
 
@@ -277,7 +341,7 @@ The account names shown here must match the names used in `actual-amazon.json`.
 
 ## Manual dry-run matching
 
-```
+```bash
 npm run match -- --amazon-json data/amazon-history.json
 ```
 
