@@ -68,8 +68,8 @@ Example:
       "domain": "amazon.com",
       "cookieJar": "~/.config/amazonorders/cookies-personal.json",
       "paymentMethods": {
-        "2345": "Frontier Airlines Mastercard",
-        "3456": "Chase Amazon VISA"
+        "1234": "Frontier Airlines Mastercard",
+        "2345": "Chase Amazon VISA"
       }
     },
     "second": {
@@ -77,7 +77,7 @@ Example:
       "domain": "amazon.com",
       "cookieJar": "~/.config/amazonorders/cookies-second.json",
       "paymentMethods": {
-        "1234": "Chase Freedom VISA"
+        "3456": "Chase Freedom VISA"
       }
     }
   }
@@ -114,9 +114,86 @@ To clear that account's stored cookies and authenticate again:
 
 The program does not use cookies from an existing Firefox or Chrome profile. The `amazon-orders` session and its cookie jar are used instead.
 
-Amazon may require MFA, JavaScript challenges, or other anti-bot checks. Playwright and Chromium are installed separately so `amazon-orders` can handle browser-based authentication challenges.
+Amazon may require MFA, JavaScript challenges, WAF challenges, or CAPTCHA checks. Playwright and Chromium are installed separately so `amazon-orders` can handle browser-based authentication challenges.
 
 Amazon login state is reused on subsequent runs. If Amazon rejects the stored session, the program will attempt to authenticate again.
+
+## Amazon CAPTCHA and browser challenges
+
+Amazon may occasionally interrupt login with a JavaScript authentication challenge, an ACIC challenge, an AWS WAF challenge, or another CAPTCHA-style verification.
+
+If you repeatedly receive an error such as:
+
+```
+Amazon returned a JavaScript-based authentication challenge.
+```
+
+or:
+
+```
+Browser timed out waiting for the JavaScript challenge to resolve.
+```
+
+you can configure `amazon-orders` to use its Playwright browser handlers.
+
+Create:
+
+```
+~/.config/amazonorders/config.yml
+```
+
+with:
+
+```
+auth_forms_classes:
+  - amazonorders.contrib.browser.playwright.PlaywrightAcicForm
+  - amazonorders.contrib.browser.playwright.PlaywrightJSAuthForm
+  - amazonorders.contrib.browser.playwright.PlaywrightManualWafForm
+```
+
+`PlaywrightAcicForm` should be registered first and handles Amazon's ACIC challenge page.
+
+`PlaywrightJSAuthForm` provides a best-effort handler for Amazon's JavaScript bot-detection page.
+
+`PlaywrightManualWafForm` opens a visible browser window when Amazon presents an AWS WAF challenge that requires interactive handling. This is particularly useful when running `actual-amazon` on a desktop Linux, macOS, or Windows machine where a browser window can be displayed. The challenge can be completed manually and the resulting cookies are returned to the `amazon-orders` session.
+
+The browser configuration is used by `amazon-orders` itself; it is separate from the Amazon account configuration in this project.
+
+The current `amazon-orders` package uses the following configuration location on Linux and macOS:
+
+```
+~/.config/amazonorders/config.yml
+```
+
+On Windows, the package currently derives the same path from the user's home directory rather than using `%APPDATA%`, so it will normally be under:
+
+```
+%USERPROFILE%\.config\amazonorders\config.yml
+```
+
+The exact resolved location can be confirmed from the `amazon-orders` installation if necessary.
+
+The `[browser]` extra is required:
+
+```
+pip install amazon-orders[browser]
+```
+
+and the Chromium browser must be installed:
+
+```
+playwright install chromium
+```
+
+The browser handlers above address JavaScript, ACIC, and WAF browser challenges. They do not automatically solve every type of image CAPTCHA. Older image-based CAPTCHA handling is a separate `amazon-orders` feature.
+
+If Amazon presents a challenge repeatedly, clear the corresponding Amazon cookie jar and authenticate again:
+
+```
+./bin/amazon-login personal --fresh
+```
+
+Amazon may also increase CAPTCHA frequency after repeated failed login attempts. Using the correct credentials, allowing time between repeated attempts, and completing challenges in a normal browser can reduce repeated challenges.
 
 ## Normal run
 
@@ -164,15 +241,15 @@ For example:
 
 ```
 Amazon account: personal
-Card: ••••2345
+Card: ••••1234
 Actual account: Frontier Airlines Mastercard
 
 Amazon account: personal
-Card: ••••3456
+Card: ••••2345
 Actual account: Chase Amazon VISA
 
 Amazon account: second
-Card: ••••1234
+Card: ••••3456
 Actual account: Chase Freedom VISA
 ```
 
