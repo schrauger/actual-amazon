@@ -14,7 +14,7 @@ from amazonorders.exception import AmazonOrdersAuthRedirectError
 from amazonorders.orders import AmazonOrders
 from amazonorders.session import AmazonSession
 from amazonorders.transactions import AmazonTransactions
-
+from pathlib import Path
 
 def main() -> None:
     args = parse_args()
@@ -33,7 +33,7 @@ def main() -> None:
         print()
         print(f"Fetching Amazon account: {account_name}")
 
-        orders, transactions = fetch_account(profile, args)
+        orders, transactions = fetch_account(account_name, profile, args)
 
         results[account_name] = {
             "orders": [to_plain_value(order) for order in orders],
@@ -154,29 +154,32 @@ def select_accounts(
     return requested
 
 
-def create_session(
-    profile: dict[str, Any],
-    args: argparse.Namespace,
-) -> AmazonSession:
-    cookie_jar = Path(
-        profile["cookieJar"]
-    ).expanduser().resolve()
+def get_cookie_jar_path(account_name: str) -> Path:
+    cookie_dir = (
+        Path.home()
+        / ".config"
+        / "amazonorders"
+    )
 
-    cookie_jar.parent.mkdir(
+    cookie_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    domain = (
-        profile.get("domain")
-        or args.domain
-        or "amazon.com"
+    return cookie_dir / f"cookies-{account_name}.json"
+
+def create_session(
+    account_name: str,
+    profile: dict[str, Any],
+    args: argparse.Namespace,
+) -> AmazonSession:
+    cookie_jar = get_cookie_jar_path(
+        account_name
     )
 
     config = AmazonOrdersConfig(
         data={
             "cookie_jar_path": str(cookie_jar),
-            "domain": domain,
         }
     )
 
@@ -186,12 +189,6 @@ def create_session(
         debug=args.debug,
     )
 
-    # amazon-orders keeps persistent authentication cookies
-    # separate from its in-memory authentication flag.
-    #
-    # If a valid authentication cookie is already stored,
-    # restore the authenticated state for this session so
-    # AmazonOrders/AmazonTransactions will allow requests.
     if session.auth_cookies_stored():
         session.is_authenticated = True
 
@@ -204,27 +201,44 @@ def login_accounts(
 ) -> None:
     for account_name in account_names:
         profile = config["amazonAccounts"][account_name]
-        cookie_jar = Path(profile["cookieJar"]).expanduser().resolve()
+        cookie_jar = get_cookie_jar_path(account_name)
 
         if args.fresh:
-            cookie_jar.unlink(missing_ok=True)
-            print(f"Removed cookie jar: {cookie_jar}")
+            cookie_jar.unlink(
+                missing_ok=True
+            )
+            print(
+                f"Removed cookie jar: {cookie_jar}"
+            )
 
         print()
-        print(f"Logging into Amazon account: {account_name}")
-        print(f"Username: {profile['username']}")
+        print(
+            f"Logging into Amazon account: "
+            f"{account_name}"
+        )
+        print(
+            f"Username: {profile['username']}"
+        )
 
-        session = create_session(profile, args)
+        session = create_session(
+            account_name,
+            profile,
+            args,
+        )
+
         session.login()
 
-        print(f"Login successful; cookies stored in {cookie_jar}")
-
+        print(
+            f"Login successful; cookies stored in "
+            f"{cookie_jar}"
+        )
 
 def fetch_account(
+    account_name: str,
     profile: dict[str, Any],
     args: argparse.Namespace,
 ) -> tuple[list[Any], list[Any]]:
-    session = create_session(profile, args)
+    session = create_session(account_name, profile, args)
 
     if not session.is_authenticated:
         print("No stored Amazon authentication; starting login.")

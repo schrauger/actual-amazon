@@ -2,19 +2,15 @@
   "amazonAccounts": {
     "personal": {
       "username": "amazon-account@example.com",
-      "domain": "amazon.com",
-      "cookieJar": "~/.config/amazonorders/cookies-personal.json",
       "paymentMethods": {
-        "2345": "Frontier Airlines Mastercard",
-        "3456": "Amazon Prime Visa"
+        "1234": "Frontier Airlines Mastercard",
+        "2345": "Amazon Prime Visa"
       }
     },
     "second": {
       "username": "another-amazon-account@example.com",
-      "domain": "amazon.com",
-      "cookieJar": "~/.config/amazonorders/cookies-business.json",
       "paymentMethods": {
-        "4567": "Chase Sapphire"
+        "3456": "Chase Sapphire"
       }
     }
   }

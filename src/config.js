@@ -72,10 +72,6 @@ function validateAmazonConfig(config) {
       throw new Error(`Amazon account "${accountName}" is missing "username".`);
     }
 
-    if (!profile.cookieJar) {
-      throw new Error(`Amazon account "${accountName}" is missing "cookieJar".`);
-    }
-
     if (
       !profile.paymentMethods ||
       typeof profile.paymentMethods !== 'object' ||
