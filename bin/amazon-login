@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+project_dir="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+cd "$project_dir"
+
+account="${1:-}"
+
+if [[ -z "$account" ]]; then
+    echo "Usage: ./bin/amazon-login <amazon-account> [--fresh]" >&2
+    exit 1
+fi
+
+shift
+
+exec .venv/bin/python src/fetch_amazon.py \
+    --login \
+    --amazon-account "$account" \
+    "$@"

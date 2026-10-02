@@ -4,6 +4,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import * as api from '@actual-app/api';
+import {
+  getConfiguredActualAccountNames,
+  getMappedActualAccountName,
+  loadAmazonConfig,
+} from './config.js';
 
 const MATCH_DATE_WINDOW_DAYS = 7;
 const DEFAULT_FUZZY_MATCH_TOLERANCE_CENTS = 200;
@@ -83,85 +88,248 @@ async function printActualInventory() {
 }
 
 async function matchAmazonOrdersToActual(amazonFile) {
-  const amazonCharges = await readAmazonCharges(amazonFile);
-  const context = await getActualAmazonContext();
+  const config = await loadAmazonConfig();
+  const context =
+    await getActualAmazonContext(config);
+
+  const amazonCharges =
+    await readAmazonCharges(
+      amazonFile,
+      context,
+    );
   const report = buildMatchReport(context, amazonCharges);
   console.log(JSON.stringify(report, null, 2));
 }
 
 async function runPipeline() {
-  const context = await getActualAmazonContext();
+  const config = await loadAmazonConfig();
+  const amazonFile =
+    getOptionalArgument('--amazon-json') ??
+    'data/amazon-history.json';
+  const reportFile =
+    getOptionalArgument('--report') ??
+    'output/match-proposals.json';
+  const safetyDays =
+    Number(getOptionalArgument('--safety-days') ?? 7);
+  const isDryRun = hasFlag('--dry-run');
+
+  const context = await getActualAmazonContext(config);
+
   if (context.candidates.length === 0) {
-    console.log(`No unmatched Amazon transactions found in ${context.account.name}.`);
+    console.log('No unmatched Amazon transactions found.');
     return;
   }
 
-  const amazonFile = getOptionalArgument('--amazon-json') ?? 'data/amazon-history.json';
-  const reportFile = getOptionalArgument('--report') ?? 'output/match-proposals.json';
-  const safetyDays = Number(getOptionalArgument('--safety-days') ?? 7);
-  const isDryRun = hasFlag('--dry-run');
-  const startDate = getSafetyStartDate(context.candidates, safetyDays);
+  const startDate = getSafetyStartDate(
+    context.candidates,
+    safetyDays,
+  );
 
   printRunHeader({
-    accountName: context.account.name,
-    unmatchedCount: context.candidates.length,
+    amazonAccountCount:
+      Object.keys(config.amazonAccounts).length,
+    actualAccountNames:
+      context.accounts.map((account) => account.name),
+    unmatchedCount:
+      context.candidates.length,
     startDate,
     isDryRun,
   });
-  await fetchAmazonData({ amazonFile, startDate });
 
-  const amazonCharges = await readAmazonCharges(amazonFile);
-  const refreshedContext = await getActualAmazonContext();
-  const report = buildMatchReport(refreshedContext, amazonCharges);
-  await writeJsonFile(reportFile, report);
+  await fetchAmazonData({
+    amazonFile,
+    startDate,
+    configPath: config.configPath,
+  });
 
-  printPipelineSummary(report, reportFile, { isDryRun });
-  printMatchedProposals(report.proposals, { isDryRun });
-  printUnmatchedTransactions(report.unmatchedActualTransactions);
+  const amazonCharges =
+    await readAmazonCharges(
+      amazonFile,
+      context,
+    );
+
+  const report =
+    buildMatchReport(
+      context,
+      amazonCharges,
+    );
+
+  await writeJsonFile(
+    reportFile,
+    report,
+  );
+
+  printPipelineSummary(
+    report,
+    reportFile,
+    { isDryRun },
+  );
+
+  printMatchedProposals(
+    report.proposals,
+    { isDryRun },
+  );
+
+  printUnmatchedTransactions(
+    report.unmatchedActualTransactions,
+  );
 
   if (isDryRun) {
     return;
   }
 
-  const applyResult = await applyMatchProposals(report.proposals);
+  const applyResult =
+    await applyMatchProposals(
+      report.proposals,
+    );
+
   await api.sync();
+
   printApplySummary(applyResult);
 }
 
-async function getActualAmazonContext() {
-  const account = await findConfiguredAccount();
-  const transactions = await api.getTransactions(account.id, '1900-01-01', '2100-12-31');
-  const amazonAccountTransactions = transactions.filter(isAmazonAccountTransaction);
-  const candidates = amazonAccountTransactions.filter(isUncategorizedTransaction);
+async function getActualAmazonContext(config) {
+  const configuredNames = getConfiguredActualAccountNames(config);
+  const accounts = await api.getAccounts();
+
+  const accountsByName = new Map();
+
+  for (const accountName of configuredNames) {
+    const account = accounts.find(
+      (candidate) => candidate.name === accountName,
+    );
+
+    if (!account) {
+      throw new Error(
+        `Actual account not found: ${accountName}`,
+      );
+    }
+
+    accountsByName.set(accountName, account);
+  }
+
+  const accountContexts = await Promise.all(
+    [...accountsByName.values()].map(async (account) => {
+      const transactions = await api.getTransactions(
+        account.id,
+        '1900-01-01',
+        '2100-12-31',
+      );
+
+      const accountTransactions = transactions.map((transaction) => ({
+        ...transaction,
+        actualAccountId: account.id,
+        actualAccountName: account.name,
+      }));
+
+      return {
+        account,
+        transactions: accountTransactions,
+        amazonAccountTransactions:
+          accountTransactions.filter(isAmazonAccountTransaction),
+        candidates:
+          accountTransactions.filter(isUncategorizedTransaction),
+      };
+    }),
+  );
 
   return {
-    account,
-    amazonAccountTransactions,
-    candidates,
+    config,
+    accountsByName,
+    accounts: accountContexts.map((context) => context.account),
+    accountContexts,
+    amazonAccountTransactions: accountContexts.flatMap(
+      (context) => context.amazonAccountTransactions,
+    ),
+    candidates: accountContexts.flatMap(
+      (context) => context.candidates,
+    ),
   };
 }
 
-function buildMatchReport(context, amazonCharges) {
-  const proposals = buildOrderAllocationProposals(
-    amazonCharges,
-    context.amazonAccountTransactions,
-    context.candidates,
-  );
-  const matchedActualTransactionIds = new Set(proposals.map((proposal) => proposal.actualTransaction.id));
-  const unmatchedActualTransactions = context.candidates
-    .filter((transaction) => !matchedActualTransactionIds.has(transaction.id))
-    .map(describeActualTransaction);
+function buildMatchReport(
+  context,
+  amazonCharges,
+) {
+  const proposals =
+    buildOrderAllocationProposals(
+      amazonCharges,
+      context.amazonAccountTransactions,
+      context.candidates,
+    );
+
+  const matchedActualTransactionIds =
+    new Set(
+      proposals.map(
+        (proposal) =>
+          proposal.actualTransaction.id,
+      ),
+    );
+
+  const unmatchedActualTransactions =
+    context.candidates
+      .filter(
+        (transaction) =>
+          !matchedActualTransactionIds.has(
+            transaction.id,
+          ),
+      )
+      .map(describeActualTransaction);
 
   return {
-    account: context.account.name,
-    fuzzyMatchToleranceCents: getFuzzyMatchToleranceCents(),
-    amazonChargeCount: amazonCharges.length,
-    uncategorizedAmazonTransactionCount: context.candidates.length,
-    proposalCount: proposals.length,
-    unmatchedActualTransactionCount: unmatchedActualTransactions.length,
+    actualAccounts: context.accounts.map(
+      (account) => account.name,
+    ),
+
+    unmappedAmazonCharges:
+      amazonCharges
+        .filter(
+          (charge) =>
+            !charge.actualAccountId &&
+            !isNonActualPaymentMethod(
+              charge.paymentMethod,
+            ),
+        )
+        .map((charge) => ({
+          amazonAccount:
+            charge.amazonAccount,
+          orderId:
+            charge.orderId,
+          date:
+            charge.date,
+          amount:
+            charge.total,
+          paymentMethod:
+            charge.paymentMethod,
+          paymentMethodLast4:
+            charge.paymentMethodLast4,
+        })),
+
+    fuzzyMatchToleranceCents:
+      getFuzzyMatchToleranceCents(),
+
+    amazonChargeCount:
+      amazonCharges.length,
+
+    unmatchedActualTransactionCount:
+      context.candidates.length,
+
+    proposalCount:
+      proposals.length,
+
+    stillUnmatchedActualTransactionCount:
+      unmatchedActualTransactions.length,
+
     unmatchedActualTransactions,
+
     proposals,
   };
+}
+
+function isNonActualPaymentMethod(paymentMethod) {
+  return /gift|reward|points/i.test(
+    paymentMethod ?? '',
+  );
 }
 
 function getSafetyStartDate(transactions, safetyDays) {
@@ -179,13 +347,21 @@ function getSafetyStartDate(transactions, safetyDays) {
   return startDate.toISOString().slice(0, 10);
 }
 
-async function fetchAmazonData({ amazonFile, startDate }) {
-  await fs.mkdir(path.dirname(path.resolve(amazonFile)), { recursive: true });
+async function fetchAmazonData({ amazonFile, startDate, configPath }) {
+  await fs.mkdir(path.dirname(path.resolve(amazonFile)), {
+    recursive: true,
+  });
+
   await runProcess('.venv/bin/python', [
     'src/fetch_amazon.py',
-    '--output', amazonFile,
-    '--start-date', startDate,
-    '--supplement-after', startDate,
+    '--config',
+    configPath,
+    '--output',
+    amazonFile,
+    '--start-date',
+    startDate,
+    '--supplement-after',
+    startDate,
   ]);
 }
 
@@ -213,23 +389,76 @@ async function writeJsonFile(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function printRunHeader({ accountName, unmatchedCount, startDate, isDryRun }) {
+function printRunHeader({
+  amazonAccountCount,
+  actualAccountNames,
+  unmatchedCount,
+  startDate,
+  isDryRun,
+}) {
   printSection('Run settings');
-  console.log(`Mode: ${isDryRun ? 'dry run' : 'apply matched splits'}`);
-  console.log(`Actual account: ${accountName}`);
-  console.log(`Unmatched Amazon transactions: ${unmatchedCount}`);
-  console.log(`Amazon fetch start: ${startDate}`);
+
+  console.log(
+    `Mode: ${isDryRun ? 'dry run' : 'apply matched splits'}`,
+  );
+
+  console.log(
+    `Amazon accounts: ${amazonAccountCount}`,
+  );
+
+  console.log(
+    `Actual accounts: ${actualAccountNames.join(', ')}`,
+  );
+
+  console.log(
+    `Unmatched Amazon transactions: ${unmatchedCount}`,
+  );
+
+  console.log(
+    `Amazon fetch start: ${startDate}`,
+  );
 }
 
-function printPipelineSummary(report, reportFile, { isDryRun }) {
-  printSection(isDryRun ? 'Match preview' : 'Match results');
+function printPipelineSummary(
+  report,
+  reportFile,
+  { isDryRun },
+) {
+  printSection(
+    isDryRun
+      ? 'Match preview'
+      : 'Match results',
+  );
+
   printKeyValueRows([
-    ['Actual account', report.account],
-    ['Amazon charges fetched', report.amazonChargeCount],
-    ['Unmatched Actual Amazon txns', report.uncategorizedAmazonTransactionCount],
-    ['Matched proposals', report.proposalCount],
-    ['Still unmatched', report.unmatchedActualTransactionCount],
-    ['Report file', reportFile],
+    [
+      'Actual accounts',
+      report.actualAccounts.join(', '),
+    ],
+    [
+      'Amazon charges fetched',
+      report.amazonChargeCount,
+    ],
+    [
+      'Actual transactions examined',
+      report.unmatchedActualTransactionCount,
+    ],
+    [
+      'Matched proposals',
+      report.proposalCount,
+    ],
+    [
+      'Still unmatched',
+      report.stillUnmatchedActualTransactionCount,
+    ],
+    [
+      'Unmapped Amazon charges',
+      report.unmappedAmazonCharges.length,
+    ],
+    [
+      'Report file',
+      reportFile,
+    ],
   ]);
 }
 
@@ -444,17 +673,71 @@ function printApplySummary(result) {
     }
   }
 }
+async function readAmazonCharges(amazonFile, context) {
+  const rawContent = await fs.readFile(
+    path.resolve(amazonFile),
+    'utf8',
+  );
 
-async function readAmazonCharges(amazonFile) {
-  const rawContent = await fs.readFile(path.resolve(amazonFile), 'utf8');
   const parsed = JSON.parse(rawContent);
-  const orders = Array.isArray(parsed) ? parsed : parsed.orders ?? [parsed];
-  const amazonTransactions = parsed.transactions ?? [];
-  const ordersById = new Map(orders.map((order) => [getAmazonOrderId(order), normalizeAmazonOrder(order)]));
 
-  return amazonTransactions
-    .map((transaction) => normalizeAmazonCharge(transaction, ordersById))
-    .filter((charge) => charge.order && charge.total !== null);
+  const accountEntries = parsed.accounts
+    ? Object.entries(parsed.accounts)
+    : getLegacyAmazonAccountEntries(parsed, context);
+
+  return accountEntries.flatMap(
+    ([amazonAccountName, accountData]) => {
+      const orders = accountData.orders ?? [];
+      const transactions = accountData.transactions ?? [];
+
+      const ordersById = new Map(
+        orders.map((order) => [
+          getAmazonOrderId(order),
+          normalizeAmazonOrder(order),
+        ]),
+      );
+
+      return transactions
+        .map((transaction) => normalizeAmazonCharge(
+          transaction,
+          ordersById,
+          amazonAccountName,
+          context,
+        ))
+        .filter(
+          (charge) =>
+            charge.order &&
+            charge.total !== null,
+        );
+    },
+  );
+}
+
+function getLegacyAmazonAccountEntries(parsed, context) {
+  const amazonAccountNames = Object.keys(
+    context.config.amazonAccounts,
+  );
+
+  if (amazonAccountNames.length !== 1) {
+    throw new Error(
+      'The supplied Amazon JSON uses the old single-account format. ' +
+      'Regenerate it with bin/fetch-amazon now that multiple Amazon accounts are configured.',
+    );
+  }
+
+  const orders = Array.isArray(parsed)
+    ? parsed
+    : parsed.orders ?? [];
+
+  const transactions = parsed.transactions ?? [];
+
+  return [[
+    amazonAccountNames[0],
+    {
+      orders,
+      transactions,
+    },
+  ]];
 }
 
 function normalizeAmazonOrder(order) {
@@ -493,76 +776,236 @@ function expandAmazonItem(item, lineIndex) {
   }));
 }
 
-function normalizeAmazonCharge(transaction, ordersById) {
+function normalizeAmazonCharge(
+  transaction,
+  ordersById,
+  amazonAccountName,
+  context,
+) {
   const orderId = getAmazonOrderId(transaction);
+  const order = ordersById.get(orderId);
+
+  const paymentMethodLast4 =
+    getPaymentMethodLast4(transaction, order);
+
+  const actualAccountName =
+    getMappedActualAccountName(
+      context.config,
+      amazonAccountName,
+      paymentMethodLast4,
+    );
+
+  const actualAccount = actualAccountName
+    ? context.accountsByName.get(actualAccountName)
+    : null;
 
   return {
+    amazonAccount: amazonAccountName,
     orderId,
     date: transaction.completed_date,
-    total: parseCurrencyAmount(transaction.grand_total ?? transaction.total ?? transaction.amount),
+    total: parseCurrencyAmount(
+      transaction.grand_total ??
+      transaction.total ??
+      transaction.amount,
+    ),
     paymentMethod: transaction.payment_method,
+    paymentMethodLast4,
+    actualAccountId: actualAccount?.id ?? null,
+    actualAccountName: actualAccount?.name ?? null,
     seller: transaction.seller,
-    order: ordersById.get(orderId),
+    order,
     raw: transaction,
   };
+}
+
+function getPaymentMethodLast4(transaction, order) {
+  const directValue =
+    transaction.payment_method_last_4 ??
+    transaction.paymentMethodLast4 ??
+    order?.payment_method_last_4 ??
+    order?.paymentMethodLast4;
+
+  if (directValue) {
+    return normalizeLast4(directValue);
+  }
+
+  const paymentMethod =
+    transaction.payment_method ??
+    transaction.paymentMethod ??
+    order?.payment_method ??
+    order?.paymentMethod;
+
+  if (!paymentMethod) {
+    return null;
+  }
+
+  const match = String(paymentMethod).match(/(\d{4})\D*$/);
+
+  return match ? match[1] : null;
+}
+
+function normalizeLast4(value) {
+  const digits = String(value).replace(/\D/g, '');
+  return digits.length >= 4
+    ? digits.slice(-4)
+    : null;
 }
 
 function getAmazonOrderId(value) {
   return value.order_number ?? value.ordernumber ?? value.orderNumber ?? value.order_id ?? value.orderId ?? value.id;
 }
 
-function buildOrderAllocationProposals(charges, actualTransactions, uncategorizedTransactions) {
-  const uncategorizedTransactionIds = new Set(uncategorizedTransactions.map((transaction) => transaction.id));
-  const chargesByOrderId = groupBy(charges.filter((charge) => charge.total !== null && charge.order), (charge) => charge.orderId);
+function buildOrderAllocationProposals(
+  charges,
+  actualTransactions,
+  uncategorizedTransactions,
+) {
+  const uncategorizedTransactionIds =
+    new Set(
+      uncategorizedTransactions.map(
+        (transaction) => transaction.id,
+      ),
+    );
 
-  return [...chargesByOrderId.values()].flatMap((orderCharges) => {
-    const purchaseCharges = orderCharges.filter((charge) => !charge.raw.is_refund && charge.raw.grand_total < 0);
-    if (purchaseCharges.length === 0) {
-      return [];
-    }
+  const reservedTransactionIds = new Set();
 
-    const order = purchaseCharges[0].order;
-    const chargeTargets = purchaseCharges.map((charge) => ({
-      charge,
-      amount: charge.total,
-      actualTransaction: findActualTransactionForCharge(charge, actualTransactions),
-    }));
-    if (!chargeTargets.some((target) => target.actualTransaction)) {
-      return [];
-    }
+  const chargesByOrder = groupBy(
+    charges.filter(
+      (charge) =>
+        charge.total !== null &&
+        charge.order,
+    ),
+    (charge) =>
+      `${charge.amazonAccount}:${charge.orderId}`,
+  );
 
-    const allocation = solveOrderAllocation(order, chargeTargets.map((target) => target.amount));
-    if (!allocation) {
-      return buildPaymentSplitFallbackProposals(order, chargeTargets, uncategorizedTransactionIds);
-    }
+  return [...chargesByOrder.values()].flatMap(
+    (orderCharges) => {
+      const purchaseCharges = orderCharges.filter(
+        (charge) =>
+          !charge.raw.is_refund &&
+          charge.raw.grand_total < 0,
+      );
 
-    return chargeTargets.flatMap((target, index) => buildAllocationProposal({
-      confidence: 'order-level-allocation',
-      order,
-      target,
-      matchedItems: allocation[index],
-      uncategorizedTransactionIds,
-    }));
-  });
+      if (purchaseCharges.length === 0) {
+        return [];
+      }
+
+      const order = purchaseCharges[0].order;
+
+      const orderReservedTransactionIds =
+        new Set(reservedTransactionIds);
+
+      const chargeTargets = purchaseCharges.map(
+        (charge) => {
+          const actualTransaction =
+            findActualTransactionForCharge(
+              charge,
+              actualTransactions,
+              orderReservedTransactionIds,
+            );
+
+          if (actualTransaction) {
+            orderReservedTransactionIds.add(
+              actualTransaction.id,
+            );
+          }
+
+          return {
+            charge,
+            amount: charge.total,
+            actualTransaction,
+          };
+        },
+      );
+
+      if (
+        !chargeTargets.some(
+          (target) => target.actualTransaction,
+        )
+      ) {
+        return [];
+      }
+
+      const allocation = solveOrderAllocation(
+        order,
+        chargeTargets.map(
+          (target) => target.amount,
+        ),
+      );
+
+      let proposals;
+
+      if (allocation) {
+        proposals = chargeTargets.flatMap(
+          (target, index) =>
+            buildAllocationProposal({
+              confidence: 'order-level-allocation',
+              order,
+              target,
+              matchedItems: allocation[index],
+              uncategorizedTransactionIds,
+            }),
+        );
+      } else {
+        proposals =
+          buildPaymentSplitFallbackProposals(
+            order,
+            chargeTargets,
+            uncategorizedTransactionIds,
+          );
+      }
+
+      for (const proposal of proposals) {
+        reservedTransactionIds.add(
+          proposal.actualTransaction.id,
+        );
+      }
+
+      return proposals;
+    },
+  );
 }
 
-function buildPaymentSplitFallbackProposals(order, chargeTargets, uncategorizedTransactionIds) {
+function buildPaymentSplitFallbackProposals(
+  order,
+  chargeTargets,
+  uncategorizedTransactionIds,
+) {
   if (!hasNonActualPaymentSplit(chargeTargets)) {
     return [];
   }
 
-  const items = order.items.filter((item) => item.amount !== null);
-  if (items.length === 0) {
+  const actualTargets = chargeTargets.filter(
+    (target) => target.actualTransaction,
+  );
+
+  if (actualTargets.length === 0) {
     return [];
   }
 
-  return chargeTargets.flatMap((target) => buildAllocationProposal({
-    confidence: 'payment-split-proportional-allocation',
+  const allocation = solveOrderAllocation(
     order,
-    target,
-    matchedItems: items,
-    uncategorizedTransactionIds,
-  }));
+    actualTargets.map(
+      (target) => target.amount,
+    ),
+  );
+
+  if (!allocation) {
+    return [];
+  }
+
+  return actualTargets.flatMap(
+    (target, index) =>
+      buildAllocationProposal({
+        confidence:
+          'payment-split-order-allocation',
+        order,
+        target,
+        matchedItems: allocation[index],
+        uncategorizedTransactionIds,
+      }),
+  );
 }
 
 function hasNonActualPaymentSplit(chargeTargets) {
@@ -571,27 +1014,62 @@ function hasNonActualPaymentSplit(chargeTargets) {
   ));
 }
 
-function buildAllocationProposal({ confidence, order, target, matchedItems, uncategorizedTransactionIds }) {
-  if (!target.actualTransaction || !uncategorizedTransactionIds.has(target.actualTransaction.id)) {
+function buildAllocationProposal({
+  confidence,
+  order,
+  target,
+  matchedItems,
+  uncategorizedTransactionIds,
+}) {
+  if (
+    !target.actualTransaction ||
+    !uncategorizedTransactionIds.has(
+      target.actualTransaction.id,
+    )
+  ) {
     return [];
   }
 
   return [{
     confidence,
+    amazonAccount: target.charge.amazonAccount,
     orderId: target.charge.orderId,
     orderDate: order.date,
     amazonChargeDate: target.charge.date,
-    amazonPaymentMethod: target.charge.paymentMethod,
+    amazonPaymentMethod:
+      target.charge.paymentMethod,
+    amazonPaymentMethodLast4:
+      target.charge.paymentMethodLast4,
     amazonSeller: target.charge.seller,
-    actualTransaction: describeActualTransaction(target.actualTransaction),
-    proposedSubtransactions: buildSubtransactions(matchedItems, target.actualTransaction),
+    actualAccountName:
+      target.charge.actualAccountName,
+    actualTransaction:
+      describeActualTransaction(
+        target.actualTransaction,
+      ),
+    proposedSubtransactions:
+      buildSubtransactions(
+        matchedItems,
+        target.actualTransaction,
+      ),
   }];
 }
 
-function findActualTransactionForCharge(charge, actualTransactions) {
+function findActualTransactionForCharge(
+  charge,
+  actualTransactions,
+  reservedTransactionIds,
+) {
+  if (!charge.actualAccountId) {
+    return null;
+  }
+
   return actualTransactions.find((transaction) => (
-    Math.abs(transaction.amount) === charge.total && areDatesNear(transaction.date, charge.date)
-  ));
+    transaction.actualAccountId === charge.actualAccountId &&
+    !reservedTransactionIds.has(transaction.id) &&
+    Math.abs(transaction.amount) === charge.total &&
+    areDatesNear(transaction.date, charge.date)
+  )) ?? null;
 }
 
 function solveOrderAllocation(order, chargeAmounts) {
@@ -649,6 +1127,8 @@ function describeActualTransaction(transaction) {
     id: transaction.id,
     date: transaction.date,
     amount: transaction.amount,
+    accountId: transaction.actualAccountId,
+    accountName: transaction.actualAccountName,
     importedPayee: transaction.imported_payee,
     notes: transaction.notes,
   };
@@ -668,18 +1148,6 @@ function buildSubtransactions(items, transaction) {
     payee: transaction.payee,
     notes: item.title,
   }));
-}
-
-async function findConfiguredAccount() {
-  const accountName = getRequiredEnv('ACTUAL_ACCOUNT_NAME');
-  const accounts = await api.getAccounts();
-  const account = accounts.find((candidate) => candidate.name === accountName);
-
-  if (!account) {
-    throw new Error(`Actual account not found: ${accountName}`);
-  }
-
-  return account;
 }
 
 function calculateLineItemPrice(item) {

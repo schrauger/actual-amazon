@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+actual-amazon.json
+!actual-amazon.json.example
 
 # Actual Budget local cache/database
 .actual-cache/
@@ -36,3 +38,4 @@ pnpm-debug.log*
 .vscode/
 *.swp
 *.swo
+

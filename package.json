@@ -12,7 +12,7 @@
     "run": "node src/actual.js run"
   },
   "dependencies": {
-    "@actual-app/api": "latest",
+    "@actual-app/api": "26.9.0",
     "dotenv": "latest"
   },
   "allowScripts": {
