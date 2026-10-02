@@ -68,8 +68,8 @@ Example:
       "domain": "amazon.com",
       "cookieJar": "~/.config/amazonorders/cookies-personal.json",
       "paymentMethods": {
-        "2971": "Frontier Airlines Mastercard (2971)",
-        "8842": "Chase Amazon VISA"
+        "2345": "Frontier Airlines Mastercard",
+        "3456": "Chase Amazon VISA"
       }
     },
     "second": {
@@ -164,11 +164,11 @@ For example:
 
 ```
 Amazon account: personal
-Card: ••••2971
-Actual account: Frontier Airlines Mastercard (2971)
+Card: ••••2345
+Actual account: Frontier Airlines Mastercard
 
 Amazon account: personal
-Card: ••••8842
+Card: ••••3456
 Actual account: Chase Amazon VISA
 
 Amazon account: second
