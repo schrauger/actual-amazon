@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 actual-amazon.json
+*.bak
 !actual-amazon.json.example
 
 # Actual Budget local cache/database
