@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from amazonorders.conf import AmazonOrdersConfig
-from amazonorders.exception import AmazonOrdersAuthRedirectError
+from amazonorders.exception import (
+    AmazonOrdersAuthRedirectError,
+    AmazonOrdersError,
+)
 from amazonorders.orders import AmazonOrders
 from amazonorders.session import AmazonSession
 from amazonorders.transactions import AmazonTransactions
@@ -264,9 +267,23 @@ def fetch_account_data(
     transactions_client = AmazonTransactions(session)
 
     orders = fetch_order_history(orders_client, args)
-    transactions = transactions_client.get_transactions(
-        days=get_transaction_days(args),
-    )
+    try:
+        transactions = transactions_client.get_transactions(
+            days=get_transaction_days(args),
+        )
+    except AmazonOrdersError as error:
+        message = str(error)
+
+        if "Could not parse Transaction history" in message:
+            raise RuntimeError(
+                "Amazon transaction history could not be parsed.\n"
+                "Amazon may have changed its page format, or the installed "
+                "'amazon-orders' library may be outdated.\n\n"
+                "Try updating it with:\n"
+                "  .venv/bin/python -m pip install --upgrade amazon-orders"
+            ) from error
+
+        raise
 
     if args.supplement_missing_orders:
         orders.extend(
